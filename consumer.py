@@ -9,6 +9,7 @@ import aio_pika
 load_dotenv()
 
 RABBITMQ_URL = os.getenv("RABBITMQ_URL")
+TIMEOUT = int(os.getenv("TIMEOUT", 10))
 
 if not RABBITMQ_URL:
     print("Ошибка: переменная окружения RABBITMQ_URL не существует")
@@ -49,35 +50,39 @@ async def consume():
         async with connection:
             channel = await connection.channel()
 
-            queue = await channel.declare_queue('links', durable=False)
+            queue = await channel.declare_queue('links', durable=True)
+            print("Очередь 'links' готова к использованию")
 
-            async for message in queue:
-                async with message.process():
-                    url = message.body.decode()
-                    print(f"Получена ссылка: {url}")
+            while True:
+                try:
+                    message = await asyncio.wait_for(queue.get(), timeout=TIMEOUT)
 
-                    if url in processed_urls:
-                        print(f"Ссылка {url} уже обработана, пропускаем.")
-                        continue
+                    if message:
+                        async with message.process():
+                            url = message.body.decode()
+                            print(f"Получена ссылка: {url}")
 
-                    links = await fetch_links(url)
-                    print(f"Найдено {len(links)} новых ссылок.")
+                            new_links = await fetch_links(url)
+                            if new_links:
+                                print(f"Найдено {len(new_links)} новых ссылок.")
 
-                    for link in links:
-                        print(f"Отправка новой ссылки: {link}")
-                        await channel.default_exchange.publish(
-                            aio_pika.Message(body=link.encode()),
-                            routing_key=queue.name,
-                        )
+                                for new_url in new_links:
+                                    await channel.default_exchange.publish(
+                                        aio_pika.Message(body=new_url.encode()),
+                                        routing_key=queue.name
+                                    )
+                            else:
+                                print(f"Ссылки для обработки на странице {url} не найдены.")
+
+                except asyncio.TimeoutError:
+                    print(f"Очередь пуста в течение {TIMEOUT} секунд. Продолжаю ожидание...")
 
     except Exception as e:
-        print(f"Ошибка при обработке очереди: {e}")
         exit(1)
 
 
-def main():
-    asyncio.run(consume())
-
+async def main():
+    await consume()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
